@@ -1,5 +1,5 @@
 import httpx
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Body
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
 from typing import List
@@ -68,6 +68,39 @@ def clear_all_prices(db: Session = Depends(get_db)):
     db.query(SpotPrice).delete()
     db.commit()
     return {"message": "All cached prices deleted"}
+
+# Add these imports if not present
+from fastapi import Body
+
+# 1. Manual Refresh (Trigger Fetch)
+@app.get("/prices/refresh")
+async def refresh_prices(db: Session = Depends(get_db)):
+    # This triggers the logic already inside calculate-cost but as a standalone action
+    await calculate_cheapest_time(ApplianceTask(consumption_kwh=0, duration_mins=0), db)
+    return {"message": "Prices updated from external API"}
+
+# 2. Create Manual Price
+@app.post("/prices", response_model=PriceResponse)
+def create_price(price: PriceResponse, db: Session = Depends(get_db)):
+    db_price = SpotPrice(
+        time_start=price.time_start,
+        sek_per_kwh=price.sek_per_kwh,
+        zone=price.zone or "SE3"
+    )
+    db.add(db_price)
+    db.commit()
+    db.refresh(db_price)
+    return db_price
+
+# 3. Delete Specific Price
+@app.delete("/prices/{price_id}")
+def delete_price(price_id: int, db: Session = Depends(get_db)):
+    price = db.query(SpotPrice).filter(SpotPrice.id == price_id).first()
+    if not price:
+        raise HTTPException(status_code=404, detail="Price not found")
+    db.delete(price)
+    db.commit()
+    return {"message": "Price deleted"}
 
 # ---------------------------------------------------------
 # Business Logic & Caching Endpoint

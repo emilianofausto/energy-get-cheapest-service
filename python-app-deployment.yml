@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: energy-python-service
+  name: energy-get-cheapest-service
 spec:
   ports:
   - port: 8000
@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
       - name: energy-python
-        image: flokisecurity/energy-python-service:latest
+        image: flokisecurity/energy-get-cheapest-service:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
