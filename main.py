@@ -1,6 +1,6 @@
 import httpx
 from fastapi import FastAPI, HTTPException, Depends, Body
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 import os
@@ -59,6 +59,8 @@ class ApplianceTask(BaseModel):
     duration_mins: int
 
 class PriceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True) # Nueva forma
+    
     id: Optional[int] = None
     time_start: datetime
     sek_per_kwh: float
