@@ -2,23 +2,37 @@ import httpx
 from fastapi import FastAPI, HTTPException, Depends, Body
 from pydantic import BaseModel
 from datetime import datetime, timezone, timedelta
-from typing import List
+from typing import List, Optional
 import os
 
 from sqlalchemy import create_engine, Column, Integer, Float, DateTime, String
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
 # Database Configuration
-# Defaults to localhost for local testing. Will be overridden by K8s environment variables later.
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/energyprices")
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Global variables for lazy initialization
+_engine = None
+_SessionLocal = None
 Base = declarative_base()
 
-# ---------------------------------------------------------
-# Database Models
-# ---------------------------------------------------------
+# --- Lazy Initialization Helpers ---
+def get_engine():
+    global _engine
+    if _engine is None:
+        # Engine is created only when needed
+        _engine = create_engine(DATABASE_URL)
+        # Create tables if they don't exist
+        Base.metadata.create_all(bind=_engine)
+    return _engine
+
+def get_session_local():
+    global _SessionLocal
+    if _SessionLocal is None:
+        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=get_engine())
+    return _SessionLocal
+
+# --- Database Models ---
 class SpotPrice(Base):
     __tablename__ = "spot_prices"
     
@@ -27,38 +41,33 @@ class SpotPrice(Base):
     sek_per_kwh = Column(Float, nullable=False)
     zone = Column(String, index=True)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
-
 app = FastAPI(title="Energy Cost API with PostgreSQL Cache")
 
 # Dependency to get DB session
 def get_db():
+    # Use the lazy-initialized session factory
+    SessionLocal = get_session_local()
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
-# ---------------------------------------------------------
-# Pydantic Schemas for validation
-# ---------------------------------------------------------
+# --- Pydantic Schemas ---
 class ApplianceTask(BaseModel):
     consumption_kwh: float
     duration_mins: int
 
 class PriceResponse(BaseModel):
-    id: int
+    id: Optional[int] = None
     time_start: datetime
     sek_per_kwh: float
-    zone: str
+    zone: Optional[str] = "SE3"
 
     class Config:
         from_attributes = True
 
-# ---------------------------------------------------------
-# CRUD Endpoints (Strict VG Requirement)
-# ---------------------------------------------------------
+# --- CRUD Endpoints ---
 @app.get("/prices", response_model=List[PriceResponse])
 def get_all_prices(db: Session = Depends(get_db)):
     return db.query(SpotPrice).all()
@@ -69,17 +78,12 @@ def clear_all_prices(db: Session = Depends(get_db)):
     db.commit()
     return {"message": "All cached prices deleted"}
 
-# Add these imports if not present
-from fastapi import Body
-
-# 1. Manual Refresh (Trigger Fetch)
 @app.get("/prices/refresh")
 async def refresh_prices(db: Session = Depends(get_db)):
-    # This triggers the logic already inside calculate-cost but as a standalone action
+    # Triggering the fetch logic via a dummy task
     await calculate_cheapest_time(ApplianceTask(consumption_kwh=0, duration_mins=0), db)
     return {"message": "Prices updated from external API"}
 
-# 2. Create Manual Price
 @app.post("/prices", response_model=PriceResponse)
 def create_price(price: PriceResponse, db: Session = Depends(get_db)):
     db_price = SpotPrice(
@@ -92,7 +96,6 @@ def create_price(price: PriceResponse, db: Session = Depends(get_db)):
     db.refresh(db_price)
     return db_price
 
-# 3. Delete Specific Price
 @app.delete("/prices/{price_id}")
 def delete_price(price_id: int, db: Session = Depends(get_db)):
     price = db.query(SpotPrice).filter(SpotPrice.id == price_id).first()
@@ -102,25 +105,19 @@ def delete_price(price_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Price deleted"}
 
-# ---------------------------------------------------------
-# Business Logic & Caching Endpoint
-# ---------------------------------------------------------
+# --- Business Logic ---
 @app.post("/calculate-cost")
 async def calculate_cheapest_time(task: ApplianceTask, db: Session = Depends(get_db)):
-    # 1. Determine current hour in UTC to check cache
     now = datetime.now(timezone.utc)
     current_hour = now.replace(minute=0, second=0, microsecond=0)
     
-    # 2. Check if we have data for the current hour in the database (Cache hit)
     cached_price = db.query(SpotPrice).filter(SpotPrice.time_start == current_hour).first()
     
     if not cached_price:
-        # Cache miss: Data is missing or outdated. Fetch from external API.
         today_local = datetime.now()
         year = today_local.strftime("%Y")
         date_str = today_local.strftime("%m-%d")
         
-        # Hardcoded to SE3 (Stockholm/Tyresö region)
         url = f"https://www.elprisetjustnu.se/api/v1/prices/{year}/{date_str}_SE3.json"
         
         async with httpx.AsyncClient() as client:
@@ -130,11 +127,8 @@ async def calculate_cheapest_time(task: ApplianceTask, db: Session = Depends(get
             
             prices_data = response.json()
         
-        # 3. Store new data in the PostgreSQL database
         for entry in prices_data:
             start_time = datetime.fromisoformat(entry["time_start"])
-            
-            # Upsert logic to avoid duplicate key errors
             existing = db.query(SpotPrice).filter(SpotPrice.time_start == start_time).first()
             if not existing:
                 new_price = SpotPrice(
@@ -143,16 +137,13 @@ async def calculate_cheapest_time(task: ApplianceTask, db: Session = Depends(get
                     zone="SE3"
                 )
                 db.add(new_price)
-        
         db.commit()
 
-    # 4. Fetch all future valid prices from the database for calculation
     valid_prices = db.query(SpotPrice).filter(SpotPrice.time_start >= current_hour).all()
     
     if not valid_prices:
-        raise HTTPException(status_code=500, detail="No valid prices available for calculation")
+        raise HTTPException(status_code=500, detail="No valid prices available")
 
-    # 5. Algorithm to find the cheapest time
     best_hour = None
     lowest_cost = float('inf')
 
