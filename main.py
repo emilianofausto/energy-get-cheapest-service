@@ -59,15 +59,12 @@ class ApplianceTask(BaseModel):
     duration_mins: int
 
 class PriceResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True) # Nueva forma
+    model_config = ConfigDict(from_attributes=True)
     
     id: Optional[int] = None
     time_start: datetime
     sek_per_kwh: float
     zone: Optional[str] = "SE3"
-
-    class Config:
-        from_attributes = True
 
 # --- CRUD Endpoints ---
 @app.get("/prices", response_model=List[PriceResponse])
